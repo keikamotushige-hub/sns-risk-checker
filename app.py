@@ -2,12 +2,15 @@ import os
 from pathlib import Path
 
 from flask import Flask, render_template, request
-from openai import OpenAI, OpenAIError
+from google import genai
 from supabase import create_client
 
 BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
+
+# 無料枠向けの軽量モデル（Google AI Studio の無料枠で利用可能）
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 SYSTEM_PROMPT = """あなたはSNS炎上リスクを判定するコンサルタントです。ユーザーの投稿文を分析し、以下の形式で回答してください。
 # 炎上リスクスコア: [0-100点]
@@ -21,23 +24,19 @@ SYSTEM_PROMPT = """あなたはSNS炎上リスクを判定するコンサルタ�
 
 
 def analyze_text(text: str) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "環境変数 OPENAI_API_KEY が設定されていません。"
-            "Vercel またはローカルの環境変数に API キーを設定してください。"
+            "環境変数 GEMINI_API_KEY が設定されていません。"
+            "Google AI Studio で無料キーを取得し、Vercel またはローカルに設定してください。"
         )
 
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.3,
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}",
     )
-    content = response.choices[0].message.content
+    content = (response.text or "").strip()
     if not content:
         raise RuntimeError("AIから有効な応答を取得できませんでした。")
     return content
@@ -76,14 +75,11 @@ def index():
                 try:
                     save_to_supabase(input_text, result)
                 except Exception:
-                    # 判定結果は返す。保存失敗はユーザー向けに簡潔に通知。
                     error = "判定は完了しましたが、Supabaseへの保存に失敗しました。"
-            except OpenAIError:
-                error = "AI判定に失敗しました。しばらくしてから再度お試しください。"
             except RuntimeError as exc:
                 error = str(exc)
             except Exception:
-                error = "予期しないエラーが発生しました。しばらくしてから再度お試しください。"
+                error = "AI判定に失敗しました。APIキーと通信量枠を確認して、再度お試しください。"
 
     return render_template(
         "index.html",
