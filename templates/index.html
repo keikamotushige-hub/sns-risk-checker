@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SNS炎上リスク判定</title>
+  <style>
+    :root {
+      --bg: #f3f6f8;
+      --ink: #1a2430;
+      --muted: #5b6b7c;
+      --accent: #0b6e4f;
+      --accent-hover: #095a41;
+      --danger-bg: #fdecee;
+      --danger-ink: #8a1f2b;
+      --panel: #ffffff;
+      --line: #d7e0e8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(11, 110, 79, 0.12), transparent 40%),
+        radial-gradient(circle at bottom right, rgba(26, 36, 48, 0.08), transparent 35%),
+        var(--bg);
+    }
+
+    main {
+      width: min(720px, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 2.5rem 0 3rem;
+    }
+
+    h1 {
+      margin: 0 0 0.5rem;
+      font-size: clamp(1.6rem, 4vw, 2rem);
+      letter-spacing: 0.02em;
+    }
+
+    .lead {
+      margin: 0 0 1.5rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    form {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 600;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 180px;
+      resize: vertical;
+      padding: 0.9rem 1rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+      line-height: 1.6;
+      color: var(--ink);
+      background: #fbfcfd;
+    }
+
+    textarea:focus {
+      outline: 2px solid rgba(11, 110, 79, 0.35);
+      border-color: var(--accent);
+    }
+
+    button {
+      margin-top: 1rem;
+      width: 100%;
+      border: 0;
+      border-radius: 8px;
+      padding: 0.9rem 1rem;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: var(--accent-hover);
+    }
+
+    .message {
+      margin-top: 1.25rem;
+      padding: 1rem 1.1rem;
+      border-radius: 10px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+    }
+
+    .error {
+      background: var(--danger-bg);
+      color: var(--danger-ink);
+      border: 1px solid #f3c4cb;
+    }
+
+    .result {
+      background: var(--panel);
+      border: 1px solid var(--line);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SNS炎上リスク判定</h1>
+    <p class="lead">投稿前のテキストを入力すると、AIが炎上リスクを判定し、言い換え案を提案します。</p>
+
+    <form method="post" action="/">
+      <label for="input_text">投稿テキスト</label>
+      <textarea
+        id="input_text"
+        name="input_text"
+        placeholder="ここにSNSへ投稿する予定の文章を入力してください"
+        required
+      >{{ input_text }}</textarea>
+      <button type="submit">判定する</button>
+    </form>
+
+    {% if error %}
+      <div class="message error">{{ error }}</div>
+    {% endif %}
+
+    {% if result %}
+      <div class="message result">{{ result }}</div>
+    {% endif %}
+  </main>
+</body>
+</html>
