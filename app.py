@@ -9,8 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 
-# 無料枠向けの軽量モデル（Google AI Studio の無料枠で利用可能）
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+# 無料枠向けの軽量モデル（枠が 0 のときは GEMINI_MODEL を別モデルに変更）
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
 SYSTEM_PROMPT = """あなたはSNS炎上リスクを判定するコンサルタントです。ユーザーの投稿文を分析し、以下の形式で回答してください。
 # 炎上リスクスコア: [0-100点]
@@ -32,22 +32,35 @@ def analyze_text(text: str) -> str:
             f"（現在のキー文字数: 0 / モデル: {GEMINI_MODEL}）"
         )
 
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}",
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Geminiへの接続に失敗しました（モデル: {GEMINI_MODEL}）。"
-            f"詳細: {type(exc).__name__}: {exc}"
-        ) from exc
+    prompt = f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}"
+    models_to_try = []
+    for name in (GEMINI_MODEL, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"):
+        if name not in models_to_try:
+            models_to_try.append(name)
 
-    content = (getattr(response, "text", None) or "").strip()
-    if not content:
-        raise RuntimeError("AIから有効な応答を取得できませんでした。")
-    return content
+    client = genai.Client(api_key=api_key)
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
+            content = (getattr(response, "text", None) or "").strip()
+            if content:
+                return content
+            last_error = RuntimeError("AIから有効な応答を取得できませんでした。")
+        except Exception as exc:
+            last_error = RuntimeError(
+                f"Geminiへの接続に失敗しました（モデル: {model_name}）。"
+                f"詳細: {type(exc).__name__}: {exc}"
+            )
+            message = str(exc)
+            if "429" in message or "RESOURCE_EXHAUSTED" in message or "quota" in message.lower():
+                continue
+            raise last_error from exc
+
+    raise last_error or RuntimeError("AI判定に失敗しました。")
 
 
 @app.route("/health")
