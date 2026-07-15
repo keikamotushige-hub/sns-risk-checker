@@ -17,9 +17,7 @@
       --line: #d7e0e8;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -27,13 +25,13 @@
       font-family: "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(11, 110, 79, 0.12), transparent 40%),
-        radial-gradient(circle at bottom right, rgba(26, 36, 48, 0.08), transparent 35%),
+        radial-gradient(circle at top left, rgba(11, 14, 79, 0.08), transparent 40%),
+        radial-gradient(circle at bottom right, rgba(11, 110, 79, 0.12), transparent 35%),
         var(--bg);
     }
 
     main {
-      width: min(720px, calc(100% - 2rem));
+      width: min(760px, calc(100% - 2rem));
       margin: 0 auto;
       padding: 2.5rem 0 3rem;
     }
@@ -41,7 +39,6 @@
     h1 {
       margin: 0 0 0.5rem;
       font-size: clamp(1.6rem, 4vw, 2rem);
-      letter-spacing: 0.02em;
     }
 
     .lead {
@@ -55,38 +52,62 @@
       border: 1px solid var(--line);
       border-radius: 12px;
       padding: 1.25rem;
+      display: grid;
+      gap: 1rem;
     }
 
-    label {
+    .field label {
       display: block;
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.45rem;
       font-weight: 600;
     }
 
-    textarea {
+    .hint {
+      margin: 0.35rem 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    textarea,
+    input[type="url"],
+    input[type="file"] {
       width: 100%;
-      min-height: 180px;
-      resize: vertical;
-      padding: 0.9rem 1rem;
+      padding: 0.85rem 1rem;
       border: 1px solid var(--line);
       border-radius: 8px;
       font: inherit;
-      line-height: 1.6;
       color: var(--ink);
       background: #fbfcfd;
     }
 
-    textarea:focus {
+    textarea {
+      min-height: 140px;
+      resize: vertical;
+      line-height: 1.6;
+    }
+
+    textarea:focus,
+    input[type="url"]:focus {
       outline: 2px solid rgba(11, 110, 79, 0.35);
       border-color: var(--accent);
     }
 
+    .grid-2 {
+      display: grid;
+      gap: 1rem;
+    }
+
+    @media (min-width: 700px) {
+      .grid-2 {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
     button {
-      margin-top: 1rem;
-      width: 100%;
       border: 0;
       border-radius: 8px;
-      padding: 0.9rem 1rem;
+      padding: 0.95rem 1rem;
       background: var(--accent);
       color: #fff;
       font: inherit;
@@ -94,9 +115,7 @@
       cursor: pointer;
     }
 
-    button:hover {
-      background: var(--accent-hover);
-    }
+    button:hover { background: var(--accent-hover); }
 
     .message {
       margin-top: 1.25rem;
@@ -121,17 +140,59 @@
 <body>
   <main>
     <h1>SNS炎上リスク判定</h1>
-    <p class="lead">投稿前のテキストを入力すると、AIが炎上リスクを判定し、言い換え案を提案します。</p>
+    <p class="lead">
+      Xの文章・画像、YouTube / TikTok の動画までまとめて判定できます。
+      Gemini（gemini-2.5-flash）で分析します。
+    </p>
 
-    <form method="post" action="/">
-      <label for="input_text">投稿テキスト</label>
-      <textarea
-        id="input_text"
-        name="input_text"
-        placeholder="ここにSNSへ投稿する予定の文章を入力してください"
-        required
-      >{{ input_text }}</textarea>
-      <button type="submit">判定する</button>
+    <form method="post" action="/" enctype="multipart/form-data">
+      <div class="field">
+        <label for="caption">投稿文 / キャプション（X・TikTok など）</label>
+        <textarea
+          id="caption"
+          name="caption"
+          placeholder="例: Xに載せる文章、TikTokのキャプション"
+        >{{ caption }}</textarea>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="image_file">画像（X向け）</label>
+          <input id="image_file" name="image_file" type="file" accept="image/*">
+          <p class="hint">JPG / PNG / WEBP など</p>
+        </div>
+        <div class="field">
+          <label for="video_file">動画ファイル（TikTok向け推奨）</label>
+          <input id="video_file" name="video_file" type="file" accept="video/*">
+          <p class="hint">MP4 など（目安 8MB まで）</p>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="youtube_url">YouTube URL</label>
+        <input
+          id="youtube_url"
+          name="youtube_url"
+          type="url"
+          placeholder="https://www.youtube.com/watch?v=..."
+          value="{{ youtube_url }}"
+        >
+        <p class="hint">公開動画のURLを貼ると、映像内容も判定します。</p>
+      </div>
+
+      <div class="field">
+        <label for="tiktok_url">TikTok URL（任意）</label>
+        <input
+          id="tiktok_url"
+          name="tiktok_url"
+          type="url"
+          placeholder="https://www.tiktok.com/..."
+          value="{{ tiktok_url }}"
+        >
+        <p class="hint">正確さ重視なら、URLだけでなく上の動画ファイルも一緒に添付してください。</p>
+      </div>
+
+      <button type="submit">炎上リスクを判定する</button>
     </form>
 
     {% if error %}
