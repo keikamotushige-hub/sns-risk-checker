@@ -24,22 +24,41 @@ SYSTEM_PROMPT = """あなたはSNS炎上リスクを判定するコンサルタ�
 
 
 def analyze_text(text: str) -> str:
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError(
-            "環境変数 GEMINI_API_KEY が設定されていません。"
-            "Google AI Studio で無料キーを取得し、Vercel またはローカルに設定してください。"
+            "サーバーに APIキー（GEMINI_API_KEY）が入っていません。"
+            "Vercel の Environment Variables に設定してください。"
+            f"（現在のキー文字数: 0 / モデル: {GEMINI_MODEL}）"
         )
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}",
-    )
-    content = (response.text or "").strip()
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}",
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Geminiへの接続に失敗しました（モデル: {GEMINI_MODEL}）。"
+            f"詳細: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    content = (getattr(response, "text", None) or "").strip()
     if not content:
         raise RuntimeError("AIから有効な応答を取得できませんでした。")
     return content
+
+
+@app.route("/health")
+def health():
+    api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    return {
+        "ok": True,
+        "has_gemini_key": bool(api_key),
+        "gemini_key_length": len(api_key),
+        "model": GEMINI_MODEL,
+    }
 
 
 def save_to_supabase(input_text: str, result: str) -> None:
@@ -78,8 +97,11 @@ def index():
                     error = "判定は完了しましたが、Supabaseへの保存に失敗しました。"
             except RuntimeError as exc:
                 error = str(exc)
-            except Exception:
-                error = "AI判定に失敗しました。APIキーと通信量枠を確認して、再度お試しください。"
+            except Exception as exc:
+                error = (
+                    "AI判定に失敗しました。"
+                    f"（{type(exc).__name__}: {exc}）"
+                )
 
     return render_template(
         "index.html",
