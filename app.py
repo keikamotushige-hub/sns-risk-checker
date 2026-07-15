@@ -9,8 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 
-# 無料枠向けの軽量モデル（枠が 0 のときは GEMINI_MODEL を別モデルに変更）
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# 新規アカウント向けに利用しやすいモデルを既定にする
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 SYSTEM_PROMPT = """あなたはSNS炎上リスクを判定するコンサルタントです。ユーザーの投稿文を分析し、以下の形式で回答してください。
 # 炎上リスクスコア: [0-100点]
@@ -34,7 +34,13 @@ def analyze_text(text: str) -> str:
 
     prompt = f"{SYSTEM_PROMPT}\n\n【投稿文】\n{text}"
     models_to_try = []
-    for name in (GEMINI_MODEL, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"):
+    for name in (
+        GEMINI_MODEL,
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash-lite",
+    ):
         if name not in models_to_try:
             models_to_try.append(name)
 
@@ -55,8 +61,19 @@ def analyze_text(text: str) -> str:
                 f"Geminiへの接続に失敗しました（モデル: {model_name}）。"
                 f"詳細: {type(exc).__name__}: {exc}"
             )
-            message = str(exc)
-            if "429" in message or "RESOURCE_EXHAUSTED" in message or "quota" in message.lower():
+            message = str(exc).lower()
+            # 無料枠切れ・モデル非対応は次のモデルを試す
+            if any(
+                token in message
+                for token in (
+                    "429",
+                    "resource_exhausted",
+                    "quota",
+                    "404",
+                    "not_found",
+                    "no longer available",
+                )
+            ):
                 continue
             raise last_error from exc
 
