@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, render_template, request
+from flask import Flask, make_response, render_template, request
 from google import genai
 from google.genai import types
 from supabase import create_client
@@ -23,9 +23,10 @@ MODEL_CANDIDATES = (
     "gemini-2.0-flash",
 )
 
-# 公開サイトの無料枠保護（超過時はアプリ側で判定を止める）
+# 公開サイトの無料枠保護（1人3回まで。超過でロック）
 DAILY_GLOBAL_LIMIT = int(os.environ.get("DAILY_GLOBAL_LIMIT", "40"))
-DAILY_IP_LIMIT = int(os.environ.get("DAILY_IP_LIMIT", "8"))
+PER_PERSON_LIMIT = int(os.environ.get("PER_PERSON_LIMIT", "3"))
+USAGE_COOKIE = "sns_risk_uses"
 
 _usage_lock = threading.Lock()
 _usage_day = ""
@@ -65,48 +66,87 @@ def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def check_and_consume_quota(ip: str) -> str | None:
-    """上限超過ならエラー文言、OKなら None。成功呼び出し直前に消費する。"""
+def _read_cookie_uses() -> tuple[str, int]:
+    """cookie: 'YYYY-MM-DD:count'。日付が違えばリセット。"""
+    raw = (request.cookies.get(USAGE_COOKIE) or "").strip()
+    today = _today_utc()
+    if not raw or ":" not in raw:
+        return today, 0
+    day, count_str = raw.split(":", 1)
+    if day != today:
+        return today, 0
+    try:
+        return today, max(0, int(count_str))
+    except ValueError:
+        return today, 0
+
+
+def _person_used(ip: str) -> int:
+    """IP と Cookie の多い方を本人利用回数とみなす。"""
+    _, cookie_uses = _read_cookie_uses()
+    with _usage_lock:
+        today = _today_utc()
+        global _usage_day, _usage_by_ip
+        if _usage_day != today:
+            return cookie_uses
+        return max(cookie_uses, _usage_by_ip.get(ip or "unknown", 0))
+
+
+def check_quota_locked(ip: str) -> str | None:
+    """ロック中ならエラー文言。まだ使えるなら None。"""
     global _usage_day, _usage_global, _usage_by_ip
     ip = ip or "unknown"
+    used = _person_used(ip)
+    if used >= PER_PERSON_LIMIT:
+        return (
+            f"お一人様あたり本日 {PER_PERSON_LIMIT} 回までの無料チェックです。"
+            "上限に達したためロックしました。明日（日付が変わったら）再度お試しください。"
+        )
+
     with _usage_lock:
         today = _today_utc()
         if _usage_day != today:
             _usage_day = today
             _usage_global = 0
             _usage_by_ip = {}
-
         if _usage_global >= DAILY_GLOBAL_LIMIT:
             return (
                 f"本日の無料判定上限（全体 {DAILY_GLOBAL_LIMIT} 回）に達したため停止しました。"
-                "明日（UTC日付切替後）に再開します。"
-            )
-        if _usage_by_ip.get(ip, 0) >= DAILY_IP_LIMIT:
-            return (
-                f"同じ接続からの本日上限（{DAILY_IP_LIMIT} 回）に達したため停止しました。"
                 "明日になってから再度お試しください。"
             )
+    return None
 
+
+def consume_quota(ip: str) -> int:
+    """1回消費し、消費後の本人回数を返す。"""
+    global _usage_day, _usage_global, _usage_by_ip
+    ip = ip or "unknown"
+    today, cookie_uses = _read_cookie_uses()
+    with _usage_lock:
+        if _usage_day != today:
+            _usage_day = today
+            _usage_global = 0
+            _usage_by_ip = {}
         _usage_global += 1
-        _usage_by_ip[ip] = _usage_by_ip.get(ip, 0) + 1
-        return None
+        ip_uses = _usage_by_ip.get(ip, 0) + 1
+        _usage_by_ip[ip] = ip_uses
+        return max(cookie_uses + 1, ip_uses)
 
 
 def remaining_quota(ip: str) -> dict:
-    global _usage_day, _usage_global, _usage_by_ip
-    ip = ip or "unknown"
+    used = _person_used(ip)
     with _usage_lock:
         today = _today_utc()
-        if _usage_day != today:
-            return {
-                "day": today,
-                "global_remaining": DAILY_GLOBAL_LIMIT,
-                "ip_remaining": DAILY_IP_LIMIT,
-            }
+        global_remaining = DAILY_GLOBAL_LIMIT
+        if _usage_day == today:
+            global_remaining = max(0, DAILY_GLOBAL_LIMIT - _usage_global)
         return {
             "day": today,
-            "global_remaining": max(0, DAILY_GLOBAL_LIMIT - _usage_global),
-            "ip_remaining": max(0, DAILY_IP_LIMIT - _usage_by_ip.get(ip, 0)),
+            "global_remaining": global_remaining,
+            "person_remaining": max(0, PER_PERSON_LIMIT - used),
+            "person_used": used,
+            "person_limit": PER_PERSON_LIMIT,
+            "locked": used >= PER_PERSON_LIMIT,
         }
 
 
@@ -286,6 +326,7 @@ def index():
     youtube_url = ""
     tiktok_url = ""
     agreed = False
+    new_cookie_count = None
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
     quota = remaining_quota(ip)
 
@@ -305,7 +346,7 @@ def index():
         elif not any([caption, youtube_url, tiktok_url, has_image, has_video]):
             error = "文章・画像・YouTube・TikTok・動画のいずれかを入力してください。"
         else:
-            limit_error = check_and_consume_quota(ip)
+            limit_error = check_quota_locked(ip)
             if limit_error:
                 error = limit_error
             else:
@@ -317,6 +358,7 @@ def index():
                         image_file=image_file,
                         video_file=video_file,
                     )
+                    new_cookie_count = consume_quota(ip)
                     summary = " / ".join(
                         x
                         for x in [
@@ -342,7 +384,7 @@ def index():
                         error = f"AI判定に失敗しました。（{type(exc).__name__}: {exc}）"
             quota = remaining_quota(ip)
 
-    return render_template(
+    html = render_template(
         "index.html",
         result=result,
         error=error,
@@ -352,8 +394,19 @@ def index():
         agreed=agreed,
         quota=quota,
         daily_global_limit=DAILY_GLOBAL_LIMIT,
-        daily_ip_limit=DAILY_IP_LIMIT,
+        per_person_limit=PER_PERSON_LIMIT,
     )
+    response = make_response(html)
+    if new_cookie_count is not None:
+        response.set_cookie(
+            USAGE_COOKIE,
+            f"{_today_utc()}:{new_cookie_count}",
+            max_age=60 * 60 * 36,
+            httponly=True,
+            samesite="Lax",
+            secure=True,
+        )
+    return response
 
 
 if __name__ == "__main__":

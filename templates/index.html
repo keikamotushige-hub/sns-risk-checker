@@ -183,10 +183,12 @@
     </p>
 
     <div class="notice">
-      <strong>無料について:</strong>
-      Google の請求（Billing）をオンにしなければ、通常は無料枠を超えた時点で判定が止まり、勝手に課金され続けることはありません。
-      このサイトでも 1日あたり全体 {{ daily_global_limit }} 回 / 同じ接続 {{ daily_ip_limit }} 回で自動停止します。
-      本日の残り目安: 全体 {{ quota.global_remaining }} 回 / あなたの接続 {{ quota.ip_remaining }} 回。
+      <strong>無料・回数制限:</strong>
+      お一人様あたり <strong>本日 {{ per_person_limit }} 回まで</strong>。到達後はロックされます（日付が変わるまで使えません）。
+      Google の請求（Billing）をオンにしなければ、枠超過時は止めるだけで、通常は勝手に課金されません。
+      あなたの残り: <strong>{{ quota.person_remaining }} 回</strong>
+      （全体残 {{ quota.global_remaining }} / {{ daily_global_limit }}）
+      {% if quota.locked %}／ <strong>現在ロック中</strong>{% endif %}
     </div>
 
     <div class="disclaimer">
@@ -250,7 +252,9 @@
         </span>
       </label>
 
-      <button type="submit">参考チェックする</button>
+      <button type="submit" {% if quota.locked %}disabled{% endif %}>
+        {% if quota.locked %}ロック中（本日の3回を使い切りました）{% else %}参考チェックする（残り {{ quota.person_remaining }} 回）{% endif %}
+      </button>
     </form>
 
     {% if error %}
