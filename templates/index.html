@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SNS炎上リスク判定</title>
+  <title>SNS炎上リスク参考チェック</title>
   <style>
     :root {
       --bg: #f3f6f8;
@@ -15,6 +15,8 @@
       --danger-ink: #8a1f2b;
       --panel: #ffffff;
       --line: #d7e0e8;
+      --warn-bg: #fff8e8;
+      --warn-ink: #6a4b00;
     }
 
     * { box-sizing: border-box; }
@@ -25,8 +27,8 @@
       font-family: "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(11, 14, 79, 0.08), transparent 40%),
-        radial-gradient(circle at bottom right, rgba(11, 110, 79, 0.12), transparent 35%),
+        radial-gradient(circle at top left, rgba(11, 110, 79, 0.10), transparent 40%),
+        radial-gradient(circle at bottom right, rgba(26, 36, 48, 0.08), transparent 35%),
         var(--bg);
     }
 
@@ -38,13 +40,34 @@
 
     h1 {
       margin: 0 0 0.5rem;
-      font-size: clamp(1.6rem, 4vw, 2rem);
+      font-size: clamp(1.5rem, 4vw, 1.9rem);
     }
 
     .lead {
-      margin: 0 0 1.5rem;
+      margin: 0 0 1rem;
       color: var(--muted);
       line-height: 1.6;
+    }
+
+    .notice,
+    .disclaimer {
+      margin: 0 0 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 10px;
+      line-height: 1.65;
+      font-size: 0.95rem;
+    }
+
+    .notice {
+      background: var(--warn-bg);
+      color: var(--warn-ink);
+      border: 1px solid #f0d59a;
+    }
+
+    .disclaimer {
+      background: #eef3f7;
+      color: #334155;
+      border: 1px solid var(--line);
     }
 
     form {
@@ -87,21 +110,28 @@
       line-height: 1.6;
     }
 
-    textarea:focus,
-    input[type="url"]:focus {
-      outline: 2px solid rgba(11, 110, 79, 0.35);
-      border-color: var(--accent);
-    }
-
     .grid-2 {
       display: grid;
       gap: 1rem;
     }
 
     @media (min-width: 700px) {
-      .grid-2 {
-        grid-template-columns: 1fr 1fr;
-      }
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+    }
+
+    .agree {
+      display: flex;
+      gap: 0.7rem;
+      align-items: flex-start;
+      padding: 0.85rem 0.95rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      line-height: 1.55;
+    }
+
+    .agree input {
+      margin-top: 0.25rem;
     }
 
     button {
@@ -135,15 +165,37 @@
       background: var(--panel);
       border: 1px solid var(--line);
     }
+
+    footer {
+      margin-top: 1.5rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.65;
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>SNS炎上リスク判定</h1>
+    <h1>SNS炎上リスク参考チェック</h1>
     <p class="lead">
-      Xの文章・画像、YouTube / TikTok の動画までまとめて判定できます。
-      Gemini（gemini-2.5-flash）で分析します。
+      Xの文章・画像、YouTube / TikTok 動画を、Gemini 無料枠で参考判定します。
+      これはチェッカーであり、投稿の許可・禁止を決めるものではありません。
     </p>
+
+    <div class="notice">
+      <strong>無料について:</strong>
+      Google の請求（Billing）をオンにしなければ、通常は無料枠を超えた時点で判定が止まり、勝手に課金され続けることはありません。
+      このサイトでも 1日あたり全体 {{ daily_global_limit }} 回 / 同じ接続 {{ daily_ip_limit }} 回で自動停止します。
+      本日の残り目安: 全体 {{ quota.global_remaining }} 回 / あなたの接続 {{ quota.ip_remaining }} 回。
+    </div>
+
+    <div class="disclaimer">
+      <strong>重要（責任について）:</strong><br>
+      ・本サービスは AI による投稿前の参考情報です。法律相談・法令適合チェックではありません。<br>
+      ・結果の正確性・完全性を保証しません。最終的な投稿判断・責任は利用者本人にあります。<br>
+      ・差別・誹謗中傷・権利侵害・違法行為を助長する目的での利用はできません。<br>
+      ・運営者は、本ツールの利用や利用者の投稿により生じた損害について責任を負いません（法令で除外できない場合を除く）。
+    </div>
 
     <form method="post" action="/" enctype="multipart/form-data">
       <div class="field">
@@ -177,7 +229,6 @@
           placeholder="https://www.youtube.com/watch?v=..."
           value="{{ youtube_url }}"
         >
-        <p class="hint">公開動画のURLを貼ると、映像内容も判定します。</p>
       </div>
 
       <div class="field">
@@ -189,10 +240,17 @@
           placeholder="https://www.tiktok.com/..."
           value="{{ tiktok_url }}"
         >
-        <p class="hint">正確さ重視なら、URLだけでなく上の動画ファイルも一緒に添付してください。</p>
+        <p class="hint">正確さ重視なら動画ファイルも添付してください。</p>
       </div>
 
-      <button type="submit">炎上リスクを判定する</button>
+      <label class="agree">
+        <input type="checkbox" name="agree_terms" {% if agreed %}checked{% endif %} required>
+        <span>
+          これは参考チェックであり、法的助言ではないこと、投稿の最終責任は自分にあることを理解しました。
+        </span>
+      </label>
+
+      <button type="submit">参考チェックする</button>
     </form>
 
     {% if error %}
@@ -202,6 +260,13 @@
     {% if result %}
       <div class="message result">{{ result }}</div>
     {% endif %}
+
+    <footer>
+      運営: 鈴木トータルサービス（参考ツール提供） /
+      ログイン不要の公開ページのため、SNSで広めると第三者も無料枠を消費します。
+      広がる場合は共有を控えるか、上限を下げてください。
+      本表示は一般的な注意であり、個別の法的助言ではありません。
+    </footer>
   </main>
 </body>
 </html>
