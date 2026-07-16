@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ログイン | SNS炎上リスク参考チェック</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="narrow">
+    <h1>ログイン</h1>
+    <p class="lead">判定機能を使うにはログインが必要です。1アカウントあたり本日3回までです。</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="message {{ 'error' if category == 'error' else 'ok' }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    {% if error %}
+      <div class="message error">{{ error }}</div>
+    {% endif %}
+
+    {% if mode == 'passcode' %}
+      <form method="post" class="card">
+        <div class="field">
+          <label for="passcode">共通パスコード</label>
+          <input id="passcode" name="passcode" type="password" required autocomplete="current-password">
+        </div>
+        <button type="submit">ログイン</button>
+      </form>
+    {% elif mode == 'supabase' %}
+      <form method="post" class="card">
+        <div class="field">
+          <label for="email">メールアドレス</label>
+          <input id="email" name="email" type="email" required value="{{ email }}" autocomplete="username">
+        </div>
+        <div class="field">
+          <label for="password">パスワード</label>
+          <input id="password" name="password" type="password" required autocomplete="current-password">
+        </div>
+        <button type="submit">ログイン</button>
+      </form>
+      <p class="hint-center">初めての方は <a href="{{ url_for('signup') }}">新規登録</a></p>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -1,10 +1,21 @@
 import os
+import secrets
 import tempfile
 import threading
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
-from flask import Flask, make_response, render_template, request
+from flask import (
+    Flask,
+    flash,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from google import genai
 from google.genai import types
 from supabase import create_client
@@ -13,8 +24,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
-# 以前動作確認できた無料枠向けモデル
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MODEL_CANDIDATES = (
     GEMINI_MODEL,
@@ -23,7 +34,6 @@ MODEL_CANDIDATES = (
     "gemini-2.0-flash",
 )
 
-# 公開サイトの無料枠保護（1人3回まで。超過でロック）
 DAILY_GLOBAL_LIMIT = int(os.environ.get("DAILY_GLOBAL_LIMIT", "40"))
 PER_PERSON_LIMIT = int(os.environ.get("PER_PERSON_LIMIT", "3"))
 USAGE_COOKIE = "sns_risk_uses"
@@ -31,7 +41,7 @@ USAGE_COOKIE = "sns_risk_uses"
 _usage_lock = threading.Lock()
 _usage_day = ""
 _usage_global = 0
-_usage_by_ip: dict[str, int] = {}
+_usage_by_key: dict[str, int] = {}
 
 SYSTEM_PROMPT = """あなたはSNS（X / TikTok / YouTube）投稿前の参考チェックをするアシスタントです。
 これは法的助言・検閲・投稿可否の最終判断ではありません。あくまでリスクの参考情報です。
@@ -62,12 +72,53 @@ def get_api_key() -> str:
     return (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
+def get_supabase():
+    url = (os.environ.get("SUPABASE_URL") or "").strip()
+    key = (os.environ.get("SUPABASE_KEY") or "").strip()
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
+def auth_mode() -> str:
+    """supabase | passcode | unset"""
+    if get_supabase() is not None:
+        return "supabase"
+    if (os.environ.get("SITE_PASSCODE") or "").strip():
+        return "passcode"
+    return "unset"
+
+
+def current_user() -> dict | None:
+    user = session.get("user")
+    if isinstance(user, dict) and user.get("id") and user.get("email"):
+        return user
+    return None
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not current_user():
+            flash("判定を使うにはログインしてください。", "error")
+            return redirect(url_for("login", next=request.path))
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
 def _today_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _person_key(ip: str) -> str:
+    user = current_user()
+    if user:
+        return f"user:{user['id']}"
+    return f"ip:{ip or 'unknown'}"
+
+
 def _read_cookie_uses() -> tuple[str, int]:
-    """cookie: 'YYYY-MM-DD:count'。日付が違えばリセット。"""
     raw = (request.cookies.get(USAGE_COOKIE) or "").strip()
     today = _today_utc()
     if not raw or ":" not in raw:
@@ -81,21 +132,70 @@ def _read_cookie_uses() -> tuple[str, int]:
         return today, 0
 
 
+def _db_user_uses(user_id: str) -> int | None:
+    client = get_supabase()
+    if client is None:
+        return None
+    today = _today_utc()
+    try:
+        res = (
+            client.table("user_daily_usage")
+            .select("use_count")
+            .eq("user_id", user_id)
+            .eq("usage_date", today)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return 0
+        return int(rows[0].get("use_count") or 0)
+    except Exception:
+        return None
+
+
+def _db_increment_user_uses(user_id: str) -> int | None:
+    client = get_supabase()
+    if client is None:
+        return None
+    today = _today_utc()
+    current = _db_user_uses(user_id)
+    if current is None:
+        return None
+    next_count = current + 1
+    try:
+        client.table("user_daily_usage").upsert(
+            {
+                "user_id": user_id,
+                "usage_date": today,
+                "use_count": next_count,
+            },
+            on_conflict="user_id,usage_date",
+        ).execute()
+        return next_count
+    except Exception:
+        return None
+
+
 def _person_used(ip: str) -> int:
-    """IP と Cookie の多い方を本人利用回数とみなす。"""
+    user = current_user()
+    if user:
+        db_uses = _db_user_uses(user["id"])
+        if db_uses is not None:
+            return db_uses
+
     _, cookie_uses = _read_cookie_uses()
+    key = _person_key(ip)
     with _usage_lock:
         today = _today_utc()
-        global _usage_day, _usage_by_ip
+        global _usage_day, _usage_by_key
         if _usage_day != today:
-            return cookie_uses
-        return max(cookie_uses, _usage_by_ip.get(ip or "unknown", 0))
+            return cookie_uses if not user else 0
+        return max(cookie_uses if not user else 0, _usage_by_key.get(key, 0))
 
 
 def check_quota_locked(ip: str) -> str | None:
-    """ロック中ならエラー文言。まだ使えるなら None。"""
-    global _usage_day, _usage_global, _usage_by_ip
-    ip = ip or "unknown"
+    global _usage_day, _usage_global, _usage_by_key
     used = _person_used(ip)
     if used >= PER_PERSON_LIMIT:
         return (
@@ -108,7 +208,7 @@ def check_quota_locked(ip: str) -> str | None:
         if _usage_day != today:
             _usage_day = today
             _usage_global = 0
-            _usage_by_ip = {}
+            _usage_by_key = {}
         if _usage_global >= DAILY_GLOBAL_LIMIT:
             return (
                 f"本日の無料判定上限（全体 {DAILY_GLOBAL_LIMIT} 回）に達したため停止しました。"
@@ -118,19 +218,33 @@ def check_quota_locked(ip: str) -> str | None:
 
 
 def consume_quota(ip: str) -> int:
-    """1回消費し、消費後の本人回数を返す。"""
-    global _usage_day, _usage_global, _usage_by_ip
-    ip = ip or "unknown"
+    global _usage_day, _usage_global, _usage_by_key
+    user = current_user()
+    if user:
+        db_count = _db_increment_user_uses(user["id"])
+        if db_count is not None:
+            with _usage_lock:
+                today = _today_utc()
+                if _usage_day != today:
+                    _usage_day = today
+                    _usage_global = 0
+                    _usage_by_key = {}
+                _usage_global += 1
+            return db_count
+
+    key = _person_key(ip)
     today, cookie_uses = _read_cookie_uses()
     with _usage_lock:
         if _usage_day != today:
             _usage_day = today
             _usage_global = 0
-            _usage_by_ip = {}
+            _usage_by_key = {}
         _usage_global += 1
-        ip_uses = _usage_by_ip.get(ip, 0) + 1
-        _usage_by_ip[ip] = ip_uses
-        return max(cookie_uses + 1, ip_uses)
+        mem_uses = _usage_by_key.get(key, 0) + 1
+        _usage_by_key[key] = mem_uses
+        if user:
+            return mem_uses
+        return max(cookie_uses + 1, mem_uses)
 
 
 def remaining_quota(ip: str) -> dict:
@@ -289,36 +403,148 @@ def analyze_content(
                 pass
 
 
+def save_to_supabase(input_text: str, result: str, user_id: str | None = None) -> None:
+    client = get_supabase()
+    if client is None:
+        return
+
+    row = {
+        "input_text": input_text,
+        "result": result,
+    }
+    if user_id:
+        row["user_id"] = user_id
+
+    client.table("risk_checks").insert(row).execute()
+
+
 @app.route("/health")
 def health():
     api_key = get_api_key()
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
     return {
         "ok": True,
+        "auth_mode": auth_mode(),
+        "logged_in": bool(current_user()),
         "has_gemini_key": bool(api_key),
         "gemini_key_length": len(api_key),
         "model": GEMINI_MODEL,
         "quota": remaining_quota(ip),
-        "billing_note": "Keep Google Cloud billing disabled to stay free; quota errors stop requests.",
     }
 
 
-def save_to_supabase(input_text: str, result: str) -> None:
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
-    if not url or not key:
-        return
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    mode = auth_mode()
+    if mode == "passcode":
+        flash("現在は共通パスコード方式です。新規登録は不要です。ログインへ進んでください。", "error")
+        return redirect(url_for("login"))
+    if mode == "unset":
+        return render_template(
+            "login.html",
+            mode=mode,
+            error="ログイン設定が未完了です。Vercel に SUPABASE_URL / SUPABASE_KEY、または SITE_PASSCODE を設定してください。",
+            email="",
+        )
 
-    client = create_client(url, key)
-    client.table("risk_checks").insert(
-        {
-            "input_text": input_text,
-            "result": result,
-        }
-    ).execute()
+    error = None
+    email = ""
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        password = request.form.get("password") or ""
+        password2 = request.form.get("password2") or ""
+
+        if not email or not password:
+            error = "メールアドレスとパスワードを入力してください。"
+        elif len(password) < 6:
+            error = "パスワードは6文字以上にしてください。"
+        elif password != password2:
+            error = "確認用パスワードが一致しません。"
+        else:
+            client = get_supabase()
+            try:
+                res = client.auth.sign_up({"email": email, "password": password})
+                user = getattr(res, "user", None)
+                session_obj = getattr(res, "session", None)
+                if user and session_obj:
+                    session["user"] = {
+                        "id": user.id,
+                        "email": user.email or email,
+                    }
+                    flash("登録してログインしました。", "ok")
+                    return redirect(url_for("index"))
+                flash(
+                    "登録を受け付けました。メール確認が必要な設定の場合は、届いたメールを確認してからログインしてください。",
+                    "ok",
+                )
+                return redirect(url_for("login"))
+            except Exception as exc:
+                error = f"登録に失敗しました。（{exc}）"
+
+    return render_template("signup.html", mode=mode, error=error, email=email)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    mode = auth_mode()
+    error = None
+    email = ""
+
+    if mode == "unset":
+        return render_template(
+            "login.html",
+            mode=mode,
+            error="ログイン設定が未完了です。Vercel に SUPABASE_URL / SUPABASE_KEY、または SITE_PASSCODE を設定してください。",
+            email="",
+        )
+
+    if request.method == "POST":
+        if mode == "passcode":
+            passcode = request.form.get("passcode") or ""
+            expected = (os.environ.get("SITE_PASSCODE") or "").strip()
+            if passcode and passcode == expected:
+                session["user"] = {"id": "passcode-user", "email": "passcode@local"}
+                flash("ログインしました。", "ok")
+                next_url = request.args.get("next") or url_for("index")
+                return redirect(next_url)
+            error = "パスコードが正しくありません。"
+        else:
+            email = (request.form.get("email") or "").strip().lower()
+            password = request.form.get("password") or ""
+            if not email or not password:
+                error = "メールアドレスとパスワードを入力してください。"
+            else:
+                client = get_supabase()
+                try:
+                    res = client.auth.sign_in_with_password(
+                        {"email": email, "password": password}
+                    )
+                    user = getattr(res, "user", None)
+                    if not user:
+                        error = "ログインに失敗しました。"
+                    else:
+                        session["user"] = {
+                            "id": user.id,
+                            "email": user.email or email,
+                        }
+                        flash("ログインしました。", "ok")
+                        next_url = request.args.get("next") or url_for("index")
+                        return redirect(next_url)
+                except Exception as exc:
+                    error = f"ログインに失敗しました。（{exc}）"
+
+    return render_template("login.html", mode=mode, error=error, email=email)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("ログアウトしました。", "ok")
+    return redirect(url_for("login"))
 
 
 @app.route("/", methods=["GET", "POST"])
+@login_required
 def index():
     result = None
     error = None
@@ -327,6 +553,7 @@ def index():
     tiktok_url = ""
     agreed = False
     new_cookie_count = None
+    user = current_user()
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
     quota = remaining_quota(ip)
 
@@ -371,7 +598,11 @@ def index():
                         if x
                     )
                     try:
-                        save_to_supabase(summary or "(media)", result)
+                        save_to_supabase(
+                            summary or "(media)",
+                            result,
+                            user_id=user["id"] if user else None,
+                        )
                     except Exception:
                         error = "判定は完了しましたが、保存に失敗しました。"
                 except RuntimeError as exc:
@@ -395,9 +626,11 @@ def index():
         quota=quota,
         daily_global_limit=DAILY_GLOBAL_LIMIT,
         per_person_limit=PER_PERSON_LIMIT,
+        user=user,
+        auth_mode=auth_mode(),
     )
     response = make_response(html)
-    if new_cookie_count is not None:
+    if new_cookie_count is not None and not user:
         response.set_cookie(
             USAGE_COOKIE,
             f"{_today_utc()}:{new_cookie_count}",
