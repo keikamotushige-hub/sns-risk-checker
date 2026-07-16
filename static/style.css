@@ -178,6 +178,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.run-btn {
+  width: 100%;
+  min-height: 3rem;
+  position: relative;
+  z-index: 2;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
 .message {
   margin: 0 0 1rem;
   padding: 1rem 1.1rem;

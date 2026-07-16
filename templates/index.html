@@ -14,8 +14,8 @@
       </div>
       <div class="user">
         {% if user %}
-          {% if is_owner %}<strong>オーナー</strong> / {% endif %}
-          {{ user.email }} /
+          {% if is_owner %}<strong>オーナー</strong> / <a href="{{ url_for('change_password') }}">パスワード変更</a>{% else %}ログイン中{% endif %}
+          /
           <a href="{{ url_for('logout') }}">ログアウト</a>
         {% else %}
           <a href="{{ url_for('login') }}">ログイン</a>
@@ -25,7 +25,7 @@
 
     <p class="lead">
       Xの文章・画像、YouTube / TikTok 動画を、Gemini 無料枠で参考判定します。
-      ログイン必須・一般ユーザーは無料トライアル3回まで。オーナー（keikamotushige@gmail.com）は無制限です。
+      ログイン必須・一般ユーザーは無料トライアル3回までです。
     </p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -37,7 +37,7 @@
     <div class="notice">
       {% if is_owner %}
         <strong>オーナー権限:</strong>
-        keikamotushige@gmail.com は回数制限なしで利用できます（Google無料枠自体の上限は別途あります）。
+        回数制限なしで利用できます（Google無料枠自体の上限は別途あります）。
       {% else %}
         <strong>無料トライアル:</strong>
         お一人様あたり <strong>{{ per_person_limit }} 回まで</strong>（通算）。到達後はロックされます。
@@ -101,22 +101,43 @@
       </div>
 
       <label class="agree">
-        <input type="checkbox" name="agree_terms" {% if agreed %}checked{% endif %} required>
+        <input type="checkbox" name="agree_terms" id="agree_terms" {% if agreed %}checked{% endif %}>
         <span>
           これは参考チェックであり、法的助言ではないこと、投稿の最終責任は自分にあることを理解しました。
         </span>
       </label>
 
-      <button type="submit" {% if quota.locked and not is_owner %}disabled{% endif %}>
+      <button type="submit" id="run-check" class="run-btn">
         {% if is_owner %}
           参考チェックする（オーナー・制限なし）
         {% elif quota.locked %}
-          ロック中（本日の3回を使い切りました）
+          ロック中（無料枠を使い切りました）
         {% else %}
           参考チェックする（残り {{ quota.person_remaining }} 回）
         {% endif %}
       </button>
     </form>
+
+    <script>
+      (function () {
+        var form = document.querySelector("form");
+        var btn = document.getElementById("run-check");
+        var agree = document.getElementById("agree_terms");
+        if (!form || !btn) return;
+        btn.style.pointerEvents = "auto";
+        btn.style.cursor = "pointer";
+        form.addEventListener("submit", function (e) {
+          if (agree && !agree.checked) {
+            e.preventDefault();
+            alert("利用前に同意チェックを入れてください。");
+            agree.focus();
+            return;
+          }
+          btn.setAttribute("aria-busy", "true");
+          btn.textContent = "判定中…少々お待ちください";
+        });
+      })();
+    </script>
 
     {% if error %}
       <div class="message error">{{ error }}</div>
