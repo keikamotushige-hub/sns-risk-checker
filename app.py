@@ -37,6 +37,11 @@ MODEL_CANDIDATES = (
 DAILY_GLOBAL_LIMIT = int(os.environ.get("DAILY_GLOBAL_LIMIT", "40"))
 PER_PERSON_LIMIT = int(os.environ.get("PER_PERSON_LIMIT", "3"))
 USAGE_COOKIE = "sns_risk_uses"
+OWNER_EMAILS = {
+    e.strip().lower()
+    for e in (os.environ.get("OWNER_EMAILS") or "keikamotushige@gmail.com").split(",")
+    if e.strip()
+}
 
 _usage_lock = threading.Lock()
 _usage_day = ""
@@ -94,6 +99,14 @@ def current_user() -> dict | None:
     if isinstance(user, dict) and user.get("id") and user.get("email"):
         return user
     return None
+
+
+def is_owner(user: dict | None = None) -> bool:
+    user = user or current_user()
+    if not user:
+        return False
+    email = (user.get("email") or "").strip().lower()
+    return email in OWNER_EMAILS
 
 
 def login_required(view):
@@ -195,7 +208,11 @@ def _person_used(ip: str) -> int:
 
 
 def check_quota_locked(ip: str) -> str | None:
+    """ロック中ならエラー文言。まだ使えるなら None。オーナーは無制限。"""
     global _usage_day, _usage_global, _usage_by_key
+    if is_owner():
+        return None
+
     used = _person_used(ip)
     if used >= PER_PERSON_LIMIT:
         return (
@@ -248,6 +265,17 @@ def consume_quota(ip: str) -> int:
 
 
 def remaining_quota(ip: str) -> dict:
+    if is_owner():
+        return {
+            "day": _today_utc(),
+            "global_remaining": DAILY_GLOBAL_LIMIT,
+            "person_remaining": 999,
+            "person_used": 0,
+            "person_limit": PER_PERSON_LIMIT,
+            "locked": False,
+            "is_owner": True,
+        }
+
     used = _person_used(ip)
     with _usage_lock:
         today = _today_utc()
@@ -261,6 +289,7 @@ def remaining_quota(ip: str) -> dict:
             "person_used": used,
             "person_limit": PER_PERSON_LIMIT,
             "locked": used >= PER_PERSON_LIMIT,
+            "is_owner": False,
         }
 
 
@@ -628,6 +657,7 @@ def index():
         per_person_limit=PER_PERSON_LIMIT,
         user=user,
         auth_mode=auth_mode(),
+        is_owner=is_owner(user),
     )
     response = make_response(html)
     if new_cookie_count is not None and not user:
