@@ -1,7 +1,9 @@
 import os
 import secrets
+import sqlite3
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -19,8 +21,12 @@ from flask import (
 from google import genai
 from google.genai import types
 from supabase import create_client
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("DATA_DIR") or (BASE_DIR / "data"))
+LOCAL_DB_PATH = DATA_DIR / "app.db"
+LOCAL_SCHEMA_PATH = BASE_DIR / "db" / "local_schema.sql"
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
@@ -35,6 +41,7 @@ MODEL_CANDIDATES = (
 )
 
 DAILY_GLOBAL_LIMIT = int(os.environ.get("DAILY_GLOBAL_LIMIT", "40"))
+# Free trial: 3 checks per account (lifetime, not daily)
 PER_PERSON_LIMIT = int(os.environ.get("PER_PERSON_LIMIT", "3"))
 USAGE_COOKIE = "sns_risk_uses"
 OWNER_EMAILS = {
@@ -85,13 +92,36 @@ def get_supabase():
     return create_client(url, key)
 
 
+def get_local_db() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_local_db() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    schema = LOCAL_SCHEMA_PATH.read_text(encoding="utf-8")
+    with get_local_db() as conn:
+        conn.executescript(schema)
+        conn.commit()
+
+
 def auth_mode() -> str:
-    """supabase | passcode | unset"""
+    """supabase | local | passcode"""
+    mode = (os.environ.get("AUTH_MODE") or "").strip().lower()
+    if mode == "local":
+        return "local"
+    if mode == "passcode":
+        return "passcode"
     if get_supabase() is not None:
         return "supabase"
     if (os.environ.get("SITE_PASSCODE") or "").strip():
         return "passcode"
-    return "unset"
+    return "local"
+
+
+init_local_db()
 
 
 def current_user() -> dict | None:
@@ -145,17 +175,71 @@ def _read_cookie_uses() -> tuple[str, int]:
         return today, 0
 
 
-def _db_user_uses(user_id: str) -> int | None:
+def local_create_user(email: str, password: str) -> dict:
+    user_id = str(uuid.uuid4())
+    password_hash = generate_password_hash(password)
+    with get_local_db() as conn:
+        conn.execute(
+            "INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)",
+            (user_id, email, password_hash),
+        )
+        conn.execute(
+            "INSERT INTO user_trial_usage (user_id, use_count) VALUES (?, 0)",
+            (user_id,),
+        )
+        conn.commit()
+    return {"id": user_id, "email": email}
+
+
+def local_authenticate(email: str, password: str) -> dict | None:
+    with get_local_db() as conn:
+        row = conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+    if not row:
+        return None
+    if not check_password_hash(row["password_hash"], password):
+        return None
+    return {"id": row["id"], "email": row["email"]}
+
+
+def _local_trial_uses(user_id: str) -> int:
+    with get_local_db() as conn:
+        row = conn.execute(
+            "SELECT use_count FROM user_trial_usage WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return int(row["use_count"]) if row else 0
+
+
+def _local_increment_trial(user_id: str) -> int:
+    current = _local_trial_uses(user_id)
+    next_count = current + 1
+    with get_local_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_trial_usage (user_id, use_count, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+              use_count = excluded.use_count,
+              updated_at = datetime('now')
+            """,
+            (user_id, next_count),
+        )
+        conn.commit()
+    return next_count
+
+
+def _supabase_trial_uses(user_id: str) -> int | None:
     client = get_supabase()
     if client is None:
         return None
-    today = _today_utc()
     try:
         res = (
-            client.table("user_daily_usage")
+            client.table("user_trial_usage")
             .select("use_count")
             .eq("user_id", user_id)
-            .eq("usage_date", today)
             .limit(1)
             .execute()
         )
@@ -167,23 +251,22 @@ def _db_user_uses(user_id: str) -> int | None:
         return None
 
 
-def _db_increment_user_uses(user_id: str) -> int | None:
+def _supabase_increment_trial(user_id: str) -> int | None:
     client = get_supabase()
     if client is None:
         return None
-    today = _today_utc()
-    current = _db_user_uses(user_id)
+    current = _supabase_trial_uses(user_id)
     if current is None:
         return None
     next_count = current + 1
     try:
-        client.table("user_daily_usage").upsert(
+        client.table("user_trial_usage").upsert(
             {
                 "user_id": user_id,
-                "usage_date": today,
                 "use_count": next_count,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             },
-            on_conflict="user_id,usage_date",
+            on_conflict="user_id",
         ).execute()
         return next_count
     except Exception:
@@ -192,19 +275,17 @@ def _db_increment_user_uses(user_id: str) -> int | None:
 
 def _person_used(ip: str) -> int:
     user = current_user()
-    if user:
-        db_uses = _db_user_uses(user["id"])
-        if db_uses is not None:
-            return db_uses
+    if user and user.get("id") != "passcode-user":
+        if auth_mode() == "supabase":
+            db_uses = _supabase_trial_uses(user["id"])
+            if db_uses is not None:
+                return db_uses
+        return _local_trial_uses(user["id"])
 
     _, cookie_uses = _read_cookie_uses()
     key = _person_key(ip)
     with _usage_lock:
-        today = _today_utc()
-        global _usage_day, _usage_by_key
-        if _usage_day != today:
-            return cookie_uses if not user else 0
-        return max(cookie_uses if not user else 0, _usage_by_key.get(key, 0))
+        return max(cookie_uses, _usage_by_key.get(key, 0))
 
 
 def check_quota_locked(ip: str) -> str | None:
@@ -216,8 +297,9 @@ def check_quota_locked(ip: str) -> str | None:
     used = _person_used(ip)
     if used >= PER_PERSON_LIMIT:
         return (
-            f"お一人様あたり本日 {PER_PERSON_LIMIT} 回までの無料チェックです。"
-            "上限に達したためロックしました。明日（日付が変わったら）再度お試しください。"
+            f"無料トライアルはお一人様 {PER_PERSON_LIMIT} 回までです。"
+            "上限に達したためロックしました。"
+            "オーナー（keikamotushige@gmail.com）以外は追加利用できません。"
         )
 
     with _usage_lock:
@@ -237,9 +319,25 @@ def check_quota_locked(ip: str) -> str | None:
 def consume_quota(ip: str) -> int:
     global _usage_day, _usage_global, _usage_by_key
     user = current_user()
-    if user:
-        db_count = _db_increment_user_uses(user["id"])
-        if db_count is not None:
+    if user and not is_owner(user):
+        if auth_mode() == "supabase":
+            db_count = _supabase_increment_trial(user["id"])
+            if db_count is not None:
+                with _usage_lock:
+                    today = _today_utc()
+                    if _usage_day != today:
+                        _usage_day = today
+                        _usage_global = 0
+                        _usage_by_key = {}
+                    _usage_global += 1
+                # Mirror to local for VirtualBox backups
+                try:
+                    _local_increment_trial(user["id"])
+                except Exception:
+                    pass
+                return db_count
+        if auth_mode() == "local" or user["id"] != "passcode-user":
+            count = _local_increment_trial(user["id"])
             with _usage_lock:
                 today = _today_utc()
                 if _usage_day != today:
@@ -247,7 +345,7 @@ def consume_quota(ip: str) -> int:
                     _usage_global = 0
                     _usage_by_key = {}
                 _usage_global += 1
-            return db_count
+            return count
 
     key = _person_key(ip)
     today, cookie_uses = _read_cookie_uses()
@@ -259,8 +357,6 @@ def consume_quota(ip: str) -> int:
         _usage_global += 1
         mem_uses = _usage_by_key.get(key, 0) + 1
         _usage_by_key[key] = mem_uses
-        if user:
-            return mem_uses
         return max(cookie_uses + 1, mem_uses)
 
 
@@ -432,29 +528,37 @@ def analyze_content(
                 pass
 
 
-def save_to_supabase(input_text: str, result: str, user_id: str | None = None) -> None:
+def save_check(input_text: str, result: str, user_id: str | None = None) -> None:
+    """Persist to Supabase when configured, always mirror to local SQLite."""
     client = get_supabase()
-    if client is None:
-        return
+    if client is not None:
+        row = {
+            "input_text": input_text,
+            "result": result,
+        }
+        if user_id:
+            row["user_id"] = user_id
+        client.table("risk_checks").insert(row).execute()
 
-    row = {
-        "input_text": input_text,
-        "result": result,
-    }
-    if user_id:
-        row["user_id"] = user_id
-
-    client.table("risk_checks").insert(row).execute()
+    with get_local_db() as conn:
+        conn.execute(
+            "INSERT INTO risk_checks (id, user_id, input_text, result) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), user_id, input_text, result),
+        )
+        conn.commit()
 
 
 @app.route("/health")
 def health():
     api_key = get_api_key()
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    user = current_user()
     return {
         "ok": True,
         "auth_mode": auth_mode(),
-        "logged_in": bool(current_user()),
+        "logged_in": bool(user),
+        "is_owner": is_owner(user),
+        "owner_emails": sorted(OWNER_EMAILS),
         "has_gemini_key": bool(api_key),
         "gemini_key_length": len(api_key),
         "model": GEMINI_MODEL,
@@ -468,13 +572,6 @@ def signup():
     if mode == "passcode":
         flash("現在は共通パスコード方式です。新規登録は不要です。ログインへ進んでください。", "error")
         return redirect(url_for("login"))
-    if mode == "unset":
-        return render_template(
-            "login.html",
-            mode=mode,
-            error="ログイン設定が未完了です。Vercel に SUPABASE_URL / SUPABASE_KEY、または SITE_PASSCODE を設定してください。",
-            email="",
-        )
 
     error = None
     email = ""
@@ -489,6 +586,22 @@ def signup():
             error = "パスワードは6文字以上にしてください。"
         elif password != password2:
             error = "確認用パスワードが一致しません。"
+        elif mode == "local":
+            try:
+                user = local_create_user(email, password)
+                session["user"] = user
+                if is_owner(user):
+                    flash("登録してログインしました（オーナー・回数無制限）。", "ok")
+                else:
+                    flash(
+                        f"登録してログインしました。無料トライアルは {PER_PERSON_LIMIT} 回までです。",
+                        "ok",
+                    )
+                return redirect(url_for("index"))
+            except sqlite3.IntegrityError:
+                error = "このメールアドレスはすでに登録されています。"
+            except Exception as exc:
+                error = f"登録に失敗しました。（{exc}）"
         else:
             client = get_supabase()
             try:
@@ -519,14 +632,6 @@ def login():
     error = None
     email = ""
 
-    if mode == "unset":
-        return render_template(
-            "login.html",
-            mode=mode,
-            error="ログイン設定が未完了です。Vercel に SUPABASE_URL / SUPABASE_KEY、または SITE_PASSCODE を設定してください。",
-            email="",
-        )
-
     if request.method == "POST":
         if mode == "passcode":
             passcode = request.form.get("passcode") or ""
@@ -542,6 +647,18 @@ def login():
             password = request.form.get("password") or ""
             if not email or not password:
                 error = "メールアドレスとパスワードを入力してください。"
+            elif mode == "local":
+                user = local_authenticate(email, password)
+                if not user:
+                    error = "メールアドレスまたはパスワードが正しくありません。"
+                else:
+                    session["user"] = user
+                    if is_owner(user):
+                        flash("ログインしました（オーナー・回数無制限）。", "ok")
+                    else:
+                        flash("ログインしました。", "ok")
+                    next_url = request.args.get("next") or url_for("index")
+                    return redirect(next_url)
             else:
                 client = get_supabase()
                 try:
@@ -556,7 +673,10 @@ def login():
                             "id": user.id,
                             "email": user.email or email,
                         }
-                        flash("ログインしました。", "ok")
+                        if is_owner(session["user"]):
+                            flash("ログインしました（オーナー・回数無制限）。", "ok")
+                        else:
+                            flash("ログインしました。", "ok")
                         next_url = request.args.get("next") or url_for("index")
                         return redirect(next_url)
                 except Exception as exc:
@@ -627,7 +747,7 @@ def index():
                         if x
                     )
                     try:
-                        save_to_supabase(
+                        save_check(
                             summary or "(media)",
                             result,
                             user_id=user["id"] if user else None,

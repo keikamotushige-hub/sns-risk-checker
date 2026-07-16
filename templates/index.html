@@ -25,7 +25,7 @@
 
     <p class="lead">
       Xの文章・画像、YouTube / TikTok 動画を、Gemini 無料枠で参考判定します。
-      ログイン必須・一般ユーザーは1アカウントあたり本日3回までです。
+      ログイン必須・一般ユーザーは無料トライアル3回まで。オーナー（keikamotushige@gmail.com）は無制限です。
     </p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -39,8 +39,8 @@
         <strong>オーナー権限:</strong>
         keikamotushige@gmail.com は回数制限なしで利用できます（Google無料枠自体の上限は別途あります）。
       {% else %}
-        <strong>無料・回数制限:</strong>
-        お一人様あたり <strong>本日 {{ per_person_limit }} 回まで</strong>。到達後はロックされます。
+        <strong>無料トライアル:</strong>
+        お一人様あたり <strong>{{ per_person_limit }} 回まで</strong>（通算）。到達後はロックされます。
         あなたの残り: <strong>{{ quota.person_remaining }} 回</strong>
         （全体残 {{ quota.global_remaining }} / {{ daily_global_limit }}）
         {% if quota.locked %}／ <strong>現在ロック中</strong>{% endif %}

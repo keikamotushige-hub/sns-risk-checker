@@ -6,3 +6,6 @@ venv/
 *.log
 .vercel/
 .vercel
+data/
+*.db
+.vagrant/

@@ -9,7 +9,7 @@
 <body>
   <main class="narrow">
     <h1>ログイン</h1>
-    <p class="lead">判定機能を使うにはログインが必要です。1アカウントあたり本日3回までです。</p>
+    <p class="lead">判定機能を使うにはログインが必要です。一般ユーザーは無料トライアル3回まで。オーナー（keikamotushige@gmail.com）は無制限です。</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% for category, message in messages %}
@@ -29,7 +29,7 @@
         </div>
         <button type="submit">ログイン</button>
       </form>
-    {% elif mode == 'supabase' %}
+    {% else %}
       <form method="post" class="card">
         <div class="field">
           <label for="email">メールアドレス</label>
